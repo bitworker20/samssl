@@ -9,6 +9,14 @@ SamService::SamService(net::io_context& io_ctx,
 	// std::cout << "[SamService] Created for SAM bridge at " << sam_host_ << ":" << sam_port_ << std::endl;
 }
 
+SamService::SamService(net::io_context& io_ctx,
+                      const std::string& sam_host, uint16_t sam_port,
+                      SAM::Transport transport,
+                      std::shared_ptr<net::ssl::context> ssl_ctx)
+    : io_ctx_(io_ctx), sam_host_(sam_host), sam_port_(sam_port), transport_(transport), ssl_ctx_(std::move(ssl_ctx))
+{
+}
+
 SamService::~SamService() {
 	// std::cout << "[SamService] Destroying." << std::endl;
 	shutdown();
@@ -44,7 +52,10 @@ net::awaitable<EstablishSessionResult> SamService::establishControlSession(
 		SPDLOG_INFO("Control connection already exists. Closing to re-establish for {}", nickname);
 		m_controlConnection->closeSocket();
 	}
-	m_controlConnection = std::make_shared<SamConnection>(io_ctx_);
+    if (transport_ == SAM::Transport::SSL)
+        m_controlConnection = std::make_shared<SamConnection>(io_ctx_, transport_, ssl_ctx_);
+    else
+        m_controlConnection = std::make_shared<SamConnection>(io_ctx_);
 	
 	try {
 		bool connected = co_await m_controlConnection->connect(sam_host_, sam_port_, std::chrono::seconds(10));
@@ -126,7 +137,11 @@ net::awaitable<SetupStreamResult> SamService::acceptStreamViaNewConnection(
 	const std::string& control_session_id) {
 	
 	SetupStreamResult result;
-	auto data_connection = std::make_shared<SamConnection>(io_ctx_);
+    std::shared_ptr<SamConnection> data_connection;
+    if (transport_ == SAM::Transport::SSL)
+        data_connection = std::make_shared<SamConnection>(io_ctx_, transport_, ssl_ctx_);
+    else
+        data_connection = std::make_shared<SamConnection>(io_ctx_);
 	result.data_connection = data_connection; // Store early for cleanup in case of partial success
 
 	try {
@@ -188,7 +203,11 @@ net::awaitable<SetupStreamResult> SamService::connectToPeerViaNewConnection(
 	
 	SetupStreamResult result;
 	result.remote_peer_b32_address = target_peer_i2p_address_b32; // We know who we are connecting to
-	auto data_connection = std::make_shared<SamConnection>(io_ctx_);
+    std::shared_ptr<SamConnection> data_connection;
+    if (transport_ == SAM::Transport::SSL)
+        data_connection = std::make_shared<SamConnection>(io_ctx_, transport_, ssl_ctx_);
+    else
+        data_connection = std::make_shared<SamConnection>(io_ctx_);
 	result.data_connection = data_connection;
 
 	try {

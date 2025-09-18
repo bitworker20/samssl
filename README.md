@@ -50,6 +50,24 @@ public:
 - OpenSSL, ZLIB, Threads
 - i2pd（通过 FetchContent 获取源码，通过 ExternalProject 在 `i2pd/build` 内编译 `libi2pd.a`）
 
+### 启用 SSL（可选）
+库现在支持“可选 SSL 传输”。默认仍为 TCP，无需任何改动即可继续使用。
+
+启用方式（示例）：
+```cpp
+// 创建 SSL 上下文（推荐在应用初始化时复用）
+auto ssl_ctx = std::make_shared<boost::asio::ssl::context>(boost::asio::ssl::context::tls_client);
+ssl_ctx->set_default_verify_paths();
+ssl_ctx->set_verify_mode(boost::asio::ssl::verify_peer);
+
+// 使用 SSL 传输创建 SamService（保持旧构造仍为 TCP）
+SAM::SamService svc(io_ctx, "sam.host", 12345, SAM::Transport::SSL, ssl_ctx);
+```
+
+注意：
+- SAM 文本协议保持不变，仅连接阶段升级为 TLS。若为开发环境可暂时关闭证书校验，但生产环境强制开启校验并配置 CA。
+- 若 SAM-SSL 服务器需要 SNI/自签名证书校验回调，可在创建 `ssl_ctx` 时额外配置（例如 `set_verify_callback`）。
+
 ### 构建
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release

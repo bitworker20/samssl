@@ -4,7 +4,9 @@
 #include <memory>
 #include <boost/asio.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
+#include <boost/asio/ssl.hpp>
 #include "SamMessageParser.h" // For ParsedMessage
+#include "SamTransport.h"
 #include <spdlog/spdlog.h>
 
 namespace net = boost::asio;
@@ -28,7 +30,8 @@ public:
 		ERROR_STATE
 	};
 
-	SamConnection(net::io_context &io_ctx);
+		SamConnection(net::io_context &io_ctx);
+		SamConnection(net::io_context &io_ctx, SAM::Transport transport, std::shared_ptr<net::ssl::context> ssl_ctx);
 	~SamConnection();
 
 	net::awaitable<bool> connect(const std::string &host, uint16_t port, 
@@ -51,12 +54,15 @@ public:
 	ConnectionState getState() const { return current_state_; }
 	void setState(ConnectionState new_state); // Allow external state setting if needed by manager
 
-	net::ip::tcp::socket &rawSocket() { return socket_; } // Expose socket if absolutely needed by higher level (use with care)
+		net::ip::tcp::socket &rawSocket() { return socket_; } // Expose lowest layer socket
 	net::any_io_executor get_executor() { return io_ctx_.get_executor(); }
 	void cancel_read_operations();
 private:
 	net::io_context &io_ctx_;
 	net::ip::tcp::socket socket_;
+		SAM::Transport transport_ = SAM::Transport::TCP;
+		std::shared_ptr<net::ssl::context> ssl_ctx_;
+		std::unique_ptr<net::ssl::stream<net::ip::tcp::socket&>> ssl_stream_ref_;
 	SAM::SamMessageParser parser_; // Each connection might parse its own replies
 	net::streambuf read_streambuf_;
 	ConnectionState current_state_ = ConnectionState::DISCONNECTED;

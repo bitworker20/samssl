@@ -4,9 +4,11 @@
 #include <memory>
 #include <map>
 #include <boost/asio.hpp>
+#include <boost/asio/ssl.hpp>
 #include "SamConnection.h"    // Our base connection class
 #include "SamMessageParser.h" // For result structs/enums
 #include "I2PIdentityUtils.h" // For address parsing
+#include "SamTransport.h"
 
 namespace net = boost::asio;
 
@@ -36,6 +38,10 @@ class SamService : public std::enable_shared_from_this<SamService> {
 public:
 	SamService(net::io_context& io_ctx, 
 			   const std::string& sam_host, uint16_t sam_port);
+	SamService(net::io_context& io_ctx,
+	           const std::string& sam_host, uint16_t sam_port,
+	           SAM::Transport transport,
+	           std::shared_ptr<net::ssl::context> ssl_ctx = nullptr);
 	~SamService();
 
 	// Establishes the main control SAM session.
@@ -77,6 +83,8 @@ private:
 	std::string sam_host_;
 	uint16_t sam_port_;
 	SamMessageParser parser_; // A parser instance for the service if needed, though SamConnection has its own
+	SAM::Transport transport_ = SAM::Transport::TCP;
+	std::shared_ptr<net::ssl::context> ssl_ctx_;
 
 	// Connection for the main SAM session (SESSION CREATE)
 	std::shared_ptr<SamConnection> m_controlConnection; 

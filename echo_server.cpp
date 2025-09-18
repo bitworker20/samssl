@@ -7,7 +7,12 @@
 #include "SamService.h"		  // Our new service class
 #include "SamConnection.h"	  // For std::shared_ptr<SamConnection> type
 #include "SamMessageParser.h" // For enums (though not strictly needed in main)
+#include "SamTransport.h"
+#include <boost/asio/ssl.hpp>
+#include <boost/program_options.hpp>
 #include <spdlog/spdlog.h>
+
+namespace po = boost::program_options;
 
 net::io_context server_io_ctx_main;						 // Renamed global io_context
 volatile bool server_main_running = true;				 // Renamed global running flag
@@ -102,9 +107,14 @@ net::awaitable<void> process_echo_stream_with_connection(
 net::awaitable<void> echo_server_application_logic(
 	const std::string &sam_host, uint16_t sam_port,
 	const std::string &server_nickname, const std::string &server_private_key, const std::string &server_sig_type,
-	int max_concurrent_streams = 5)
+	int max_concurrent_streams = 5,
+	SAM::Transport transport = SAM::Transport::TCP,
+	std::shared_ptr<boost::asio::ssl::context> ssl_ctx = nullptr)
 {
-	g_app_sam_service = std::make_shared<SAM::SamService>(server_io_ctx_main, sam_host, sam_port);
+	if (transport == SAM::Transport::SSL)
+		g_app_sam_service = std::make_shared<SAM::SamService>(server_io_ctx_main, sam_host, sam_port, transport, ssl_ctx);
+	else
+		g_app_sam_service = std::make_shared<SAM::SamService>(server_io_ctx_main, sam_host, sam_port);
 	auto active_streams_count = std::make_shared<std::atomic<int>>(0);
 	SAM::EstablishSessionResult control_session_info;
 
@@ -222,32 +232,71 @@ int main(int argc, char *argv[])
 	std::string SERVER_SIG_TYPE_CFG = "EdDSA_SHA512_Ed25519";
 	int MAX_CLIENTS_CFG = 2;
 
-	if (argc > 1 ) {
-		if (std::string(argv[1]) != "TRANSIENT") {
-			try	{
-				std::ifstream key_file(argv[1]);
-				if (!key_file.is_open())
-				{
-					std::cerr << "Failed to open key file: " << argv[1] << std::endl;
-					return 1;
-				}
+	bool use_ssl = false;
+	bool ssl_insecure = false;
+	std::string ssl_ca_file;
+	std::string key_file;
+	bool transient = true;
 
-				auto private_key = std::string(
-					std::istreambuf_iterator<char>(key_file),
-					std::istreambuf_iterator<char>());
-				// 清理可能的换行符
-				private_key.erase(std::remove(private_key.begin(), private_key.end(), '\n'), private_key.end());
-				private_key.erase(std::remove(private_key.begin(), private_key.end(), '\r'), private_key.end());
+	try {
+		po::options_description desc("Options");
+		desc.add_options()
+			("help,h", "Show help")
+			("host,H", po::value<std::string>(&SAM_HOST_CFG)->default_value(SAM_HOST_CFG), "SAM host")
+			("port,P", po::value<uint16_t>(&SAM_PORT_CFG)->default_value(SAM_PORT_CFG), "SAM port")
+			("key,k", po::value<std::string>(&key_file), "Base64 private key file path")
+			("transient,t", po::bool_switch(&transient)->default_value(true), "Use transient destination")
+			("max-clients", po::value<int>(&MAX_CLIENTS_CFG)->default_value(MAX_CLIENTS_CFG), "Max concurrent streams")
+			("ssl", po::bool_switch(&use_ssl)->default_value(false), "Enable SSL transport")
+			("insecure", po::bool_switch(&ssl_insecure)->default_value(false), "Disable certificate verification")
+			("ca-file", po::value<std::string>(&ssl_ca_file), "CA file path for verification");
 
-				SERVER_KEY_B64_CFG = private_key;
-			}
-			catch (const std::exception &e)
+		po::positional_options_description pos;
+		pos.add("key", 1); // allow key file as first positional
+
+		po::variables_map vm;
+		po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+		po::notify(vm);
+
+		if (vm.count("help")) {
+			std::cout << "Usage: " << argv[0] << " [--host H] [--port P] [--key file|--transient] [--ssl] [--insecure] [--ca-file file] [--max-clients N]\n";
+			std::cout << desc << std::endl;
+			return 0;
+		}
+
+		if (!transient && key_file.empty()) {
+			SPDLOG_ERROR("Either --key <file> or --transient must be provided");
+			return 1;
+		}
+	} catch (const std::exception& e) {
+		SPDLOG_ERROR("Option parsing error: {}", e.what());
+		return 1;
+	}
+
+	if (transient) {
+		SERVER_KEY_B64_CFG = "TRANSIENT";
+	} else {
+		try	{
+			std::ifstream keyf(key_file);
+			if (!keyf.is_open())
 			{
-				std::cerr << "Error reading key file: " << e.what() << std::endl;
+				std::cerr << "Failed to open key file: " << key_file << std::endl;
 				return 1;
 			}
-		} else {
-			SERVER_KEY_B64_CFG = "TRANSIENT";
+
+			auto private_key = std::string(
+				std::istreambuf_iterator<char>(keyf),
+				std::istreambuf_iterator<char>());
+			// 清理可能的换行符
+			private_key.erase(std::remove(private_key.begin(), private_key.end(), '\n'), private_key.end());
+			private_key.erase(std::remove(private_key.begin(), private_key.end(), '\r'), private_key.end());
+
+			SERVER_KEY_B64_CFG = private_key;
+		}
+		catch (const std::exception &e)
+		{
+			std::cerr << "Error reading key file: " << e.what() << std::endl;
+			return 1;
 		}
 	}
 
@@ -259,36 +308,51 @@ int main(int argc, char *argv[])
 
 	SERVER_NICKNAME_CFG = SERVER_NICKNAME_CFG + "_" + I2PIdentityUtils::genRandomName();
 
+	// 初始化 SSL 上下文（按需）
+	std::shared_ptr<boost::asio::ssl::context> ssl_ctx;
+	if (use_ssl) {
+		ssl_ctx = std::make_shared<boost::asio::ssl::context>(boost::asio::ssl::context::tls_client);
+		if (ssl_insecure) {
+			SPDLOG_WARN("SSL enabled but certificate verification is DISABLED");
+			ssl_ctx->set_verify_mode(boost::asio::ssl::verify_none);
+		} else {
+			ssl_ctx->set_verify_mode(boost::asio::ssl::verify_peer);
+			if (!ssl_ca_file.empty()) ssl_ctx->load_verify_file(ssl_ca_file); else ssl_ctx->set_default_verify_paths();
+		}
+	}
+
 	try
 	{
 		net::signal_set signals(server_io_ctx_main, SIGINT, SIGTERM);
 		signals.async_wait(&app_server_signal_handler);
 
-		SPDLOG_INFO("Spawning main echo server application logic coroutine.");
+		SPDLOG_INFO("Spawning main echo server application logic coroutine. Transport={}", use_ssl ? "SSL" : "TCP");
 		net::co_spawn(server_io_ctx_main,
-					  echo_server_application_logic(SAM_HOST_CFG, SAM_PORT_CFG,
-													SERVER_NICKNAME_CFG, SERVER_KEY_B64_CFG, SERVER_SIG_TYPE_CFG,
-													MAX_CLIENTS_CFG),
-					  [](std::exception_ptr p)
+				  echo_server_application_logic(SAM_HOST_CFG, SAM_PORT_CFG,
+												SERVER_NICKNAME_CFG, SERVER_KEY_B64_CFG, SERVER_SIG_TYPE_CFG,
+												MAX_CLIENTS_CFG,
+												use_ssl ? SAM::Transport::SSL : SAM::Transport::TCP,
+												ssl_ctx),
+				  [](std::exception_ptr p)
+				  {
+					  if (p)
 					  {
-						  if (p)
+						  try
 						  {
-							  try
-							  {
-								  std::rethrow_exception(p);
-							  }
-							  catch (const std::exception &e)
-							  {
-								  SPDLOG_ERROR("Main server coroutine exited with exception: {}", e.what());
-							  }
+							  std::rethrow_exception(p);
 						  }
-						  else
+						  catch (const std::exception &e)
 						  {
-							  SPDLOG_INFO("Main server coroutine completed.");
+							  SPDLOG_ERROR("Main server coroutine exited with exception: {}", e.what());
 						  }
-						  if (!server_io_ctx_main.stopped())
-							  server_io_ctx_main.stop();
-					  });
+					  }
+					  else
+					  {
+						  SPDLOG_INFO("Main server coroutine completed.");
+					  }
+					  if (!server_io_ctx_main.stopped())
+						  server_io_ctx_main.stop();
+				  });
 
 		SPDLOG_INFO("Running server_io_ctx_main...");
 		server_io_ctx_main.run();

@@ -2,6 +2,7 @@
 #include <iostream>
 #include <boost/asio/experimental/awaitable_operators.hpp> // For operator||
 #include <boost/asio/post.hpp>
+#include <boost/asio/ssl.hpp>
 
 namespace SAM {
 
@@ -24,6 +25,14 @@ SamConnection::SamConnection(net::io_context &io_ctx)
 	  write_strand_(net::make_strand(io_ctx))
 { 	// parser_ is default constructed
 	// std::cout << "[SamConnection:" << this << "] Created." << std::endl;
+}
+
+SamConnection::SamConnection(net::io_context &io_ctx, SAM::Transport transport, std::shared_ptr<net::ssl::context> ssl_ctx)
+	: io_ctx_(io_ctx), socket_(io_ctx), parser_(), cancel_timer_(io_ctx),
+	  write_strand_(net::make_strand(io_ctx))
+{
+	transport_ = transport;
+	ssl_ctx_ = std::move(ssl_ctx);
 }
 
 SamConnection::~SamConnection()
@@ -95,8 +104,30 @@ net::awaitable<bool> SamConnection::connect(
 		}
 		// If index is 0, connect succeeded. An exception would have been thrown for other connect errors.
 
-		setState(ConnectionState::CONNECTED_NO_HELLO);
 		SPDLOG_INFO("Connected to {}:{}", host, port);
+		if (transport_ == SAM::Transport::SSL)
+		{
+			if (!ssl_ctx_)
+			{
+				SPDLOG_ERROR("SSL transport selected but ssl_context is null");
+				closeSocket();
+				co_return false;
+			}
+			// Wrap the existing socket with SSL stream (by reference)
+			ssl_stream_ref_ = std::make_unique<net::ssl::stream<net::ip::tcp::socket&>>(socket_, *ssl_ctx_);
+			try
+			{
+				co_await ssl_stream_ref_->async_handshake(net::ssl::stream_base::client, net::use_awaitable);
+				SPDLOG_INFO("SSL handshake completed");
+			}
+			catch (const std::exception &e)
+			{
+				SPDLOG_ERROR("SSL handshake failed: {}", e.what());
+				closeSocket();
+				co_return false;
+			}
+		}
+		setState(ConnectionState::CONNECTED_NO_HELLO);
 		co_return true;
 	}
 	catch (const boost::system::system_error &e)
@@ -124,7 +155,14 @@ net::awaitable<SAM::ParsedMessage> SamConnection::performHello(SteadyClock::dura
 	try
 	{
 		std::string hello_cmd = "HELLO VERSION MIN=3.1 MAX=3.2\n";
-		co_await net::async_write(socket_, net::buffer(hello_cmd), net::use_awaitable);
+		if (transport_ == SAM::Transport::SSL && ssl_stream_ref_)
+		{
+			co_await net::async_write(*ssl_stream_ref_, net::buffer(hello_cmd), net::use_awaitable);
+		}
+		else
+		{
+			co_await net::async_write(socket_, net::buffer(hello_cmd), net::use_awaitable);
+		}
 		// std::cout << "[SamConnection:" << this << " DEBUG] Sent: " << hello_cmd;
 		std::string reply_str = co_await readLine(timeout);
 		parsed_reply = parser_.parse(reply_str);
@@ -170,7 +208,14 @@ net::awaitable<SAM::ParsedMessage> SamConnection::sendCommandAndWaitReply(
 			full_command += '\n';
 		}
 		// std::cout << "[SamConnection:" << this << " DEBUG] Sending: " << command;
-		co_await net::async_write(socket_, net::buffer(full_command), net::use_awaitable);
+		if (transport_ == SAM::Transport::SSL && ssl_stream_ref_)
+		{
+			co_await net::async_write(*ssl_stream_ref_, net::buffer(full_command), net::use_awaitable);
+		}
+		else
+		{
+			co_await net::async_write(socket_, net::buffer(full_command), net::use_awaitable);
+		}
 		std::string reply_str = co_await readLine(reply_timeout);
 		parsed_reply = parser_.parse(reply_str);
 	}
@@ -197,7 +242,9 @@ net::awaitable<std::string> SamConnection::readLine(SteadyClock::duration timeou
 	{
 		boost::system::error_code ec;
 		auto result_variant = co_await (
-			net::async_read_until(socket_, read_streambuf_, '\n', net::use_awaitable) ||
+			(transport_ == SAM::Transport::SSL && ssl_stream_ref_ 
+				? net::async_read_until(*ssl_stream_ref_, read_streambuf_, '\n', net::use_awaitable)
+				: net::async_read_until(socket_, read_streambuf_, '\n', net::use_awaitable)) ||
 			cancel_timer_.async_wait(net::redirect_error(net::use_awaitable, ec)));
 
 		if (result_variant.index() == 1)
@@ -269,11 +316,13 @@ net::awaitable<std::size_t> SamConnection::streamRead(
 	try {
 		using namespace net::experimental::awaitable_operators;
 		
-		boost::system::error_code ec;	
+		boost::system::error_code ec;
 		cancel_timer_.expires_after(timeout_duration);
 		//SPDLOG_INFO("SamConnection: streamRead: cancel_timer_ expires after {}ms", std::chrono::duration_cast<std::chrono::milliseconds>(timeout_duration).count());
 		auto result_variant = co_await (
-			socket_.async_read_some(buffer, net::use_awaitable) || 
+			(transport_ == SAM::Transport::SSL && ssl_stream_ref_ 
+				? ssl_stream_ref_->async_read_some(buffer, net::use_awaitable)
+				: socket_.async_read_some(buffer, net::use_awaitable)) || 
 			cancel_timer_.async_wait(net::redirect_error(net::use_awaitable, ec))
 		);
 
@@ -334,8 +383,16 @@ net::awaitable<void> SamConnection::streamWrite(net::const_buffer buffer,
 		timeout == SteadyClock::duration::max()) {
 		try {
 			// Use strand to serialize write operations even without timeout
-			co_await net::async_write(socket_, buffer, 
-				net::bind_executor(write_strand_, net::use_awaitable));
+			if (transport_ == SAM::Transport::SSL && ssl_stream_ref_)
+			{
+				co_await net::async_write(*ssl_stream_ref_, buffer, 
+					net::bind_executor(write_strand_, net::use_awaitable));
+			}
+			else
+			{
+				co_await net::async_write(socket_, buffer, 
+					net::bind_executor(write_strand_, net::use_awaitable));
+			}
 			co_return;
 		} catch (const boost::system::system_error &e) {
 			SPDLOG_ERROR("Error in streamWrite (no timeout): {}", e.code().message());
@@ -354,8 +411,16 @@ net::awaitable<void> SamConnection::streamWrite(net::const_buffer buffer,
 		
 		auto write_task = [&]() -> net::awaitable<void> {
 			// Use strand to serialize write operations
-			co_await net::async_write(socket_, buffer, 
-				net::bind_executor(write_strand_, net::use_awaitable));
+			if (transport_ == SAM::Transport::SSL && ssl_stream_ref_)
+			{
+				co_await net::async_write(*ssl_stream_ref_, buffer, 
+					net::bind_executor(write_strand_, net::use_awaitable));
+			}
+			else
+			{
+				co_await net::async_write(socket_, buffer, 
+					net::bind_executor(write_strand_, net::use_awaitable));
+			}
 		};
 		
 		auto timeout_task = [&]() -> net::awaitable<void> {
@@ -405,6 +470,14 @@ void SamConnection::closeSocket()
 		boost::system::error_code ec;
 		// Gracefully shut down the socket. This will cancel pending reads.
 		SPDLOG_INFO("SamConnection: Executing socket shutdown and close.");
+		if (transport_ == SAM::Transport::SSL && ssl_stream_ref_)
+		{
+			// Best-effort SSL shutdown
+			try {
+				ssl_stream_ref_->shutdown(ec);
+			} catch (...) {
+			}
+		}
 		socket_.shutdown(net::ip::tcp::socket::shutdown_both, ec);
 		// Close the socket.
 		socket_.close(ec);
