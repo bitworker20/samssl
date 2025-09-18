@@ -131,8 +131,8 @@ net::awaitable<void> echo_client_application_logic(
 
 
 int main(int argc, char* argv[]) {
-	std::string SAM_HOST_CFG = "gate.peerpoker.site"; 
-	uint16_t SAM_PORT_CFG = 19969;      
+	std::string SAM_HOST_CFG = "localhost";//"gate.peerpoker.site"; 
+	uint16_t SAM_PORT_CFG = 7656;      
 	std::string CLIENT_NICKNAME_CFG = "I2PECHO"; 
 	std::string CLIENT_KEY_B64_CFG = "YOUR_BASE64_ENCODED_PRIVATE_KEY_STRING_HERE"; 
 	std::string CLIENT_SIG_TYPE_CFG = "EdDSA_SHA512_Ed25519";
@@ -143,25 +143,29 @@ int main(int argc, char* argv[]) {
 		return 1;
 	}
 	
-	try {
-		std::ifstream key_file(argv[1]);
-		if (!key_file.is_open()) {
-			SPDLOG_ERROR("Failed to open key file: {}", argv[1]);
+	if (std::string(argv[1]) != "TRANSIENT") {
+		try {
+			std::ifstream key_file(argv[1]);
+			if (!key_file.is_open()) {
+				SPDLOG_ERROR("Failed to open key file: {}", argv[1]);
+				return 1;
+			}
+				
+			auto private_key = std::string(
+				std::istreambuf_iterator<char>(key_file),
+				std::istreambuf_iterator<char>()
+			);
+			// 清理可能的换行符
+			private_key.erase(std::remove(private_key.begin(), private_key.end(), '\n'), private_key.end());
+			private_key.erase(std::remove(private_key.begin(), private_key.end(), '\r'), private_key.end());
+			
+			CLIENT_KEY_B64_CFG = private_key;
+		} catch (const std::exception& e) {
+			SPDLOG_ERROR("Error reading key file: {}", e.what());
 			return 1;
 		}
-			
-		auto private_key = std::string(
-			std::istreambuf_iterator<char>(key_file),
-			std::istreambuf_iterator<char>()
-		);
-		// 清理可能的换行符
-		private_key.erase(std::remove(private_key.begin(), private_key.end(), '\n'), private_key.end());
-		private_key.erase(std::remove(private_key.begin(), private_key.end(), '\r'), private_key.end());
-		
-		CLIENT_KEY_B64_CFG = private_key;
-	} catch (const std::exception& e) {
-		SPDLOG_ERROR("Error reading key file: {}", e.what());
-		return 1;
+	} else {
+		CLIENT_KEY_B64_CFG = "TRANSIENT";
 	}
 	
 	TARGET_PEER_I2P_ADDRESS_B32_CFG = argv[2];

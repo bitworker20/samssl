@@ -215,37 +215,39 @@ net::awaitable<void> echo_server_application_logic(
 
 int main(int argc, char *argv[])
 {
-	std::string SAM_HOST_CFG = "peerpoker.site";
-	uint16_t SAM_PORT_CFG = 19959;
+	std::string SAM_HOST_CFG = "localhost";//"peerpoker.site";
+	uint16_t SAM_PORT_CFG = 7656;
 	std::string SERVER_NICKNAME_CFG = "I2PECHO";
 	std::string SERVER_KEY_B64_CFG = "YOUR_BASE64_ENCODED_PRIVATE_KEY_STRING_HERE";
 	std::string SERVER_SIG_TYPE_CFG = "EdDSA_SHA512_Ed25519";
 	int MAX_CLIENTS_CFG = 2;
 
-	if (argc > 1 && std::string(argv[1]) != "TRANSIENT")
-	{
-		try
-		{
-			std::ifstream key_file(argv[1]);
-			if (!key_file.is_open())
+	if (argc > 1 ) {
+		if (std::string(argv[1]) != "TRANSIENT") {
+			try	{
+				std::ifstream key_file(argv[1]);
+				if (!key_file.is_open())
+				{
+					std::cerr << "Failed to open key file: " << argv[1] << std::endl;
+					return 1;
+				}
+
+				auto private_key = std::string(
+					std::istreambuf_iterator<char>(key_file),
+					std::istreambuf_iterator<char>());
+				// 清理可能的换行符
+				private_key.erase(std::remove(private_key.begin(), private_key.end(), '\n'), private_key.end());
+				private_key.erase(std::remove(private_key.begin(), private_key.end(), '\r'), private_key.end());
+
+				SERVER_KEY_B64_CFG = private_key;
+			}
+			catch (const std::exception &e)
 			{
-				std::cerr << "Failed to open key file: " << argv[1] << std::endl;
+				std::cerr << "Error reading key file: " << e.what() << std::endl;
 				return 1;
 			}
-
-			auto private_key = std::string(
-				std::istreambuf_iterator<char>(key_file),
-				std::istreambuf_iterator<char>());
-			// 清理可能的换行符
-			private_key.erase(std::remove(private_key.begin(), private_key.end(), '\n'), private_key.end());
-			private_key.erase(std::remove(private_key.begin(), private_key.end(), '\r'), private_key.end());
-
-			SERVER_KEY_B64_CFG = private_key;
-		}
-		catch (const std::exception &e)
-		{
-			std::cerr << "Error reading key file: " << e.what() << std::endl;
-			return 1;
+		} else {
+			SERVER_KEY_B64_CFG = "TRANSIENT";
 		}
 	}
 
