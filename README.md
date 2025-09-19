@@ -50,24 +50,6 @@ public:
 - OpenSSL, ZLIB, Threads
 - i2pd（通过 FetchContent 获取源码，通过 ExternalProject 在 `i2pd/build` 内编译 `libi2pd.a`）
 
-### 启用 SSL（可选）
-库现在支持“可选 SSL 传输”。默认仍为 TCP，无需任何改动即可继续使用。
-
-启用方式（示例）：
-```cpp
-// 创建 SSL 上下文（推荐在应用初始化时复用）
-auto ssl_ctx = std::make_shared<boost::asio::ssl::context>(boost::asio::ssl::context::tls_client);
-ssl_ctx->set_default_verify_paths();
-ssl_ctx->set_verify_mode(boost::asio::ssl::verify_peer);
-
-// 使用 SSL 传输创建 SamService（保持旧构造仍为 TCP）
-SAM::SamService svc(io_ctx, "sam.host", 12345, SAM::Transport::SSL, ssl_ctx);
-```
-
-注意：
-- SAM 文本协议保持不变，仅连接阶段升级为 TLS。若为开发环境可暂时关闭证书校验，但生产环境强制开启校验并配置 CA。
-- 若 SAM-SSL 服务器需要 SNI/自签名证书校验回调，可在创建 `ssl_ctx` 时额外配置（例如 `set_verify_callback`）。
-
 ### 构建
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -79,28 +61,45 @@ cmake --build build -j
 - 我们的库与示例在链接前依赖上述构建步骤（`add_dependencies` 已声明）。
 - 如需自定义 `i2pd` 的构建选项，可在 `CMakeLists.txt` 的 `ExternalProject_Add(i2pd_project)` 段落中调整 `CONFIGURE_COMMAND` 的参数（例如是否构建可执行等）。
 
-### 运行
-构建完成后，生成以下可执行文件：
-- `i2p_sam_echo_server`
-- `i2p_sam_echo_client`
+### 命令行用法（Boost.Program_options）
+构建后会生成两个程序：`i2p_sam_echo_server` 与 `i2p_sam_echo_client`。二者均支持以下通用选项：
+- `--host,-H`：SAM 网关主机（默认 `localhost`）
+- `--port,-P`：SAM 网关端口（默认 `7656`）
+- `--ssl`：启用 TLS 连接到 SAM（SAM-over-SSL）
+- `--insecure`：禁用证书校验（仅测试环境）
+- `--ca-file <file>`：指定 CA 文件，用于证书校验
 
 服务器（Echo Server）
-- 参数：`<private_key_file_path>|TRANSIENT`
-- 行为：
-  - 当参数为文件路径时，从文件读取 Base64 私钥；
-  - 当参数为 `TRANSIENT` 时，使用临时目的地（会话由 SAM 生成）。
+- 额外选项：
+  - `--key,-k <file>`：Base64 私钥文件路径
+  - `--transient,-t`：使用临时目的地（默认开启）。若同时提供 `--key` 则优先使用 `--key`
+  - `--max-clients <N>`：并发接入的最大工作协程数（默认 2）
 
+示例：
 ```bash
-./build/i2p_sam_echo_server TRANSIENT
-# 或
-./build/i2p_sam_echo_server /path/to/private_key.b64
+# 临时目的地 + TLS（禁用校验，仅测试）
+./build/i2p_sam_echo_server --host localhost --port 7656 --transient --ssl --insecure --max-clients 4
+
+# 固定私钥 + TLS（严格校验）
+./build/i2p_sam_echo_server -H test.site -P 19959 \
+  --key /path/to/private_key.b64 --ssl --ca-file /etc/ssl/certs/ca-certificates.crt
 ```
 
 客户端（Echo Client）
-- 参数：`<private_key_file_path> <target_peer_i2p_address_b32>`
+- 额外选项：
+  - `--key,-k <file>` 或 `--transient` 二选一
+  - `--target,-t <peer.b32.i2p>` 目标服务的 `.b32.i2p` 地址（必填）
 
+示例：
 ```bash
-./build/i2p_sam_echo_client /path/to/private_key.b64 <server_address>.b32.i2p
+# 临时目的地 + 连接服务端（TLS 测试模式）
+./build/i2p_sam_echo_client --host gate.test.site --port 19959 \
+  --transient --target pneokoq...rta.b32.i2p --ssl --insecure
+
+# 固定私钥 + 连接服务端（TLS 严格校验）
+./build/i2p_sam_echo_client -H gate.test.site -P 19959 \
+  --key /path/to/private_key.b64 --target serveraddr.b32.i2p --ssl \
+  --ca-file /etc/ssl/certs/ca-certificates.crt
 ```
 
 交互指令（客户端）：
@@ -108,17 +107,22 @@ cmake --build build -j
 - 输入 `big N` 可发送大小为 `N*1024` 字节的载荷。
 - 输入 `exit`/`quit` 或 Ctrl+C 结束。
 
-默认 SAM 网关
-- 示例中默认的 `SAM_HOST` 与 `SAM_PORT` 在源码内硬编码（`echo_server.cpp`、`echo_client.cpp`）。如需调整，请修改源码或扩展 CLI（推荐后续改造）。
+### 启用 SSL（可选）
+- 命令行方式：为 server/client 添加 `--ssl`。生产环境请移除 `--insecure` 并提供 `--ca-file` 或使用系统默认 CA。
+- 代码方式：仍可手动注入 `ssl::context` 并以 `Transport::SSL` 构造 `SamService`（用于集成到你自己的应用中）。
+
+代码注入示例：
+```cpp
+auto ssl_ctx = std::make_shared<boost::asio::ssl::context>(boost::asio::ssl::context::tls_client);
+ssl_ctx->set_verify_mode(boost::asio::ssl::verify_peer);
+ssl_ctx->set_default_verify_paths();
+SAM::SamService svc(io_ctx, "sam.host", 12345, SAM::Transport::SSL, ssl_ctx);
+```
 
 ### 安全与隐私
 - 日志：当前日志可能包含网关回复原文，注意避免输出包含 `DESTINATION=`/`PRIV=` 的敏感信息到生产日志。
 - 匿名性：默认 `inbound.length/outbound.length=1` 更偏向可用性，建议根据场景提升默认值或开放配置项。
-
-### 已知注意事项
-- `echo_server.cpp` 未校验 `argc` 即访问 `argv[1]`，请按上述用法提供参数。
-- `echo_client.cpp` 在循环读之前应清理 `read_ec` 与 `bytes_read`，已在建议中标注（可在后续提交修复）。
-- `SamConnection` 内部读超时计时器为成员共享，若未来引入并发读应分离为局部计时器以避免相互取消。
+- 接入等待：服务端 STREAM ACCEPT 的首次 `STREAM STATUS` 超时为 120 秒，适配网络抖动；后续 `FROM_DESTINATION` 采用长等待。
 
 ### 参考
 - i2pd 仓库（openssl 分支）：[`https://github.com/bitworker20/i2pd.git`](https://github.com/bitworker20/i2pd.git)

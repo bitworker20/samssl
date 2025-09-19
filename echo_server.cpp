@@ -248,7 +248,7 @@ int main(int argc, char *argv[])
 			("transient,t", po::bool_switch(&transient)->default_value(true), "Use transient destination")
 			("max-clients", po::value<int>(&MAX_CLIENTS_CFG)->default_value(MAX_CLIENTS_CFG), "Max concurrent streams")
 			("ssl", po::bool_switch(&use_ssl)->default_value(false), "Enable SSL transport")
-			("insecure", po::bool_switch(&ssl_insecure)->default_value(false), "Disable certificate verification")
+			("insecure,x", po::bool_switch(&ssl_insecure)->default_value(false), "Disable certificate verification")
 			("ca-file", po::value<std::string>(&ssl_ca_file), "CA file path for verification");
 
 		po::positional_options_description pos;

@@ -162,10 +162,10 @@ int main(int argc, char* argv[]) {
 			("host,H", po::value<std::string>(&SAM_HOST_CFG)->default_value(SAM_HOST_CFG), "SAM host")
 			("port,P", po::value<uint16_t>(&SAM_PORT_CFG)->default_value(SAM_PORT_CFG), "SAM port")
 			("key,k", po::value<std::string>(&key_file), "Base64 private key file path")
-			("transient", po::bool_switch(&transient)->default_value(false), "Use transient destination")
-			("target,t", po::value<std::string>(&target_b32), "Target peer .b32.i2p")
+			("transient,t", po::bool_switch(&transient)->default_value(false), "Use transient destination")
+			("target,T", po::value<std::string>(&target_b32), "Target peer .b32.i2p")
 			("ssl", po::bool_switch(&use_ssl)->default_value(false), "Enable SSL transport")
-			("insecure", po::bool_switch(&ssl_insecure)->default_value(false), "Disable certificate verification")
+			("insecure,x", po::bool_switch(&ssl_insecure)->default_value(false), "Disable certificate verification")
 			("ca-file", po::value<std::string>(&ssl_ca_file), "CA file path for verification");
 
 		po::positional_options_description pos;

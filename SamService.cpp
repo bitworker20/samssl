@@ -154,32 +154,38 @@ net::awaitable<SetupStreamResult> SamService::acceptStreamViaNewConnection(
 			throw std::runtime_error("Acceptor P2: HELLO failed: " + hello_reply.original_message);
 		}
 		
-		std::string accept_cmd = "STREAM ACCEPT ID=" + control_session_id + " SILENT=false\n";
-		co_await net::async_write(data_connection->rawSocket(), net::buffer(accept_cmd), net::use_awaitable);
-		
-		
-		std::string status_reply_line = co_await data_connection->readLine(std::chrono::seconds(30)); // Timeout for STREAM STATUS line
-		SPDLOG_INFO("STREAM ACCEPT reply, msg = {}", status_reply_line);
-		
-		SAM::ParsedMessage accept_status_parsed = parser_.parse(status_reply_line);
+		// 使用连接的统一发送接口以支持 SSL/TCP 两种传输
+		std::string accept_cmd = "STREAM ACCEPT ID=" + control_session_id + " SILENT=false";
+		SAM::ParsedMessage accept_status_parsed = co_await data_connection->sendCommandAndWaitReply(
+			accept_cmd, std::chrono::seconds(120)); // 首次 STREAM STATUS 等待更长
+		SPDLOG_INFO("STREAM ACCEPT reply, msg = {}", accept_status_parsed.original_message);
 
 		if (accept_status_parsed.type != SAM::MessageType::STREAM_STATUS || accept_status_parsed.result != SAM::ResultCode::OK) {
 			SPDLOG_ERROR("Acceptor P2: STREAM ACCEPT status error: {}", accept_status_parsed.original_message);
 			throw std::runtime_error("Acceptor P2: STREAM ACCEPT status error: " + accept_status_parsed.original_message);
 		}
 
-		// std::cout << "[SamService DEBUG] Acceptor waiting for FROM_DESTINATION line..." << std::endl;
-		std::string from_dest_line = co_await data_connection->readLine(std::chrono::hours(24*7)); // Long wait for peer
-		if (from_dest_line.empty()) { throw std::runtime_error("Acceptor P2: FROM_DESTINATION line empty."); }
-		// std::cout << "[SamService DEBUG] Acceptor got FROM_DESTINATION line: " << from_dest_line;
-		
-		result.remote_peer_b32_address = I2PIdentityUtils::getB32AddressFromSamDestinationReply(from_dest_line, false);
+		// 兼容两种网关：有些会在同一行返回 FROM_DESTINATION，有些会在下一行返回
+		if (!accept_status_parsed.destination_field.empty())
+		{
+			result.remote_peer_b32_address = I2PIdentityUtils::getB32AddressFromSamDestinationReply(
+				accept_status_parsed.destination_field, false);
+		}
+		else
+		{
+			// 等待后续的 FROM_DESTINATION 行（保持超长等待以接入客户端）
+			// std::cout << "[SamService DEBUG] Acceptor waiting for FROM_DESTINATION line..." << std::endl;
+			std::string from_dest_line = co_await data_connection->readLine(std::chrono::hours(24*7));
+			if (from_dest_line.empty()) { throw std::runtime_error("Acceptor P2: FROM_DESTINATION line empty."); }
+			// std::cout << "[SamService DEBUG] Acceptor got FROM_DESTINATION line: " << from_dest_line;
+			result.remote_peer_b32_address = I2PIdentityUtils::getB32AddressFromSamDestinationReply(from_dest_line, false);
+		}
 		if (result.remote_peer_b32_address.find("(Error:") != std::string::npos || 
 		 	result.remote_peer_b32_address.find("(Warning:") != std::string::npos || 
 			result.remote_peer_b32_address.length() < 50 ) {
-				
-			SPDLOG_ERROR("Acceptor P2: Invalid FROM_DESTINATION received: {}", from_dest_line);
-			 throw std::runtime_error("Acceptor P2: Invalid FROM_DESTINATION received: " + from_dest_line);
+			const std::string raw_from_destination = accept_status_parsed.destination_field.empty() ? std::string("<extra line>") : accept_status_parsed.destination_field;
+			SPDLOG_ERROR("Acceptor P2: Invalid FROM_DESTINATION received: {}", raw_from_destination);
+			throw std::runtime_error("Acceptor P2: Invalid FROM_DESTINATION received: " + raw_from_destination);
 		}
 
 		result.success = true;
